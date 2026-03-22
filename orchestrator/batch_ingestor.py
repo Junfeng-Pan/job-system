@@ -65,10 +65,28 @@ class BatchIngestor:
                 # 提取内容
                 content = response["body"]["choices"][0]["message"]["content"]
                 
-                # --- 修复逻辑：处理 LLM 输出中非法的单反斜杠 ---
-                # 很多 LLM 会输出类似 "Vue2\3" 或 "ODM\OEM" 的字符串，这会导致 JSON 解析失败
-                # 我们将单反斜杠替换为双反斜杠以确保 JSON 合规
+                # --- 增强版修复逻辑：处理反斜杠 ---
+                # 1. 保护已经正确转义的引号 \" -> 暂时替换为特殊占位符
+                content = content.replace('\\"', '___DOUBLE_QUOTE_ESC___')
+                # 2. 将剩下的所有反斜杠转义（解决 Vue2\3 -> Vue2\\3）
                 content = content.replace('\\', '\\\\')
+                # 3. 还原保护的引号 \"
+                content = content.replace('___DOUBLE_QUOTE_ESC___', '\\"')
+                # 4. 额外处理：如果 LLM 输出中包含真正的换行符，也需要转义，否则 json.loads 会报错
+                content = content.replace('\n', '\\n').replace('\r', '\\r')
+                
+                # 由于我们之前手工转义了 \n，但 parser 期望的是一个干净的 JSON 字符串
+                # 如果 content 本身已经是包裹在 {} 中的 JSON，手工转义换行可能会干扰解析
+                # 我们重新整理一下：最核心的是处理 \" 和孤立的 \
+                
+                # 重新精简逻辑：
+                content = response["body"]["choices"][0]["message"]["content"]
+                # 保护合法转义
+                content = content.replace('\\"', '___DQ___').replace('\\n', '___N___')
+                # 转义孤立反斜杠
+                content = content.replace('\\', '\\\\')
+                # 还原
+                content = content.replace('___DQ___', '\\"').replace('___N___', '\\n')
                 
                 # 解析 JSON 为 Pydantic 对象
                 profile = self.extractor.parser.parse(content)

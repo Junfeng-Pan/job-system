@@ -46,6 +46,11 @@ def preprocess_job_data(input_path: str, output_path: str):
     for col in valid_critical:
         df_cleaned = df_cleaned[df_cleaned[col].astype(str).str.strip() != ""]
     
+    # --- 新增逻辑：剔除“岗位详情”除去空白符后字数过少（少于 10 个字符）的行 ---
+    if "岗位详情" in df_cleaned.columns:
+        # 使用正则表达式 \s+ 匹配并移除所有空白符（空格、换行、制表符等）后再计算长度
+        df_cleaned = df_cleaned[df_cleaned["岗位详情"].astype(str).str.replace(r'\s+', '', regex=True).str.len() >= 10]
+    
     final_count = len(df_cleaned)
     
     print(f"清洗完成: 原始数据 {initial_count} 条 -> 有效数据 {final_count} 条 (剔除 {initial_count - final_count} 条)")
