@@ -1,47 +1,52 @@
-import sys
-import os
-
-# 确保能找到项目根目录下的模块
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
-
-from mysql.database import SessionLocal, JobFeature
+from mysql.database import SessionLocal, JobFeature, JobProfileJson
 from llm_service.schemas import JobProfile
+import json
 
 class FeatureStore:
-    """负责将 LLM 提取的画像存入数据库"""
+    """负责将 LLM 提取的画像数据持久化到 MySQL"""
 
-    @staticmethod
-    def save_profile(job_id: int, profile: JobProfile):
+    def save_profile(self, job_id: int, profile: JobProfile):
         """
-        保存单个岗位的画像特征
-        :param job_id: 关联的 jobs.id
-        :param profile: LLM 提取的 JobProfile Pydantic 对象
+        保存画像数据：同时保存到特征表(用于匹配)和 JSON 表(用于展示)
         """
         session = SessionLocal()
         try:
-            features = []
+            # 1. 保存到 job_profiles_json 表 (1对1)
+            # 转换为 dict 存入 JSON 字段
+            profile_dict = profile.model_dump()
             
-            # 1. 存入 Skills (Type: 1)
+            # 检查是否已存在（Upsert 逻辑）
+            existing_json = session.query(JobProfileJson).filter_by(job_id=job_id).first()
+            if existing_json:
+                existing_json.profile_data = profile_dict
+            else:
+                new_json = JobProfileJson(job_id=job_id, profile_data=profile_dict)
+                session.add(new_json)
+
+            # 2. 保存到 job_features 表 (多对1)
+            # 先删除该岗位旧的特征，实现覆盖更新
+            session.query(JobFeature).filter_by(job_id=job_id).delete()
+            
+            features_to_add = []
+            
+            # 处理 Skills (Type 1)
             for s in profile.skills:
-                features.append(JobFeature(job_id=job_id, feature_type=1, name=s.name, evidence=s.evidence))
-                
-            # 2. 存入 Thresholds (Type: 2)
-            for t in profile.thresholds:
-                features.append(JobFeature(job_id=job_id, feature_type=2, name=t.name, evidence=t.evidence))
-                
-            # 3. 存入 Professionalism (Type: 3)
-            for p in profile.professionalism:
-                features.append(JobFeature(job_id=job_id, feature_type=3, name=p.name, evidence=p.evidence))
+                features_to_add.append(JobFeature(job_id=job_id, feature_type=1, name=s.name, evidence=s.evidence))
             
-            if features:
-                session.bulk_save_objects(features)
-                session.commit()
-                # print(f"已为 Job ID {job_id} 保存 {len(features)} 条特征。")
+            # 处理 Thresholds (Type 2)
+            for b in profile.thresholds:
+                features_to_add.append(JobFeature(job_id=job_id, feature_type=2, name=b.name, evidence=b.evidence))
+                
+            # 处理 Professionalism (Type 3)
+            for q in profile.professionalism:
+                features_to_add.append(JobFeature(job_id=job_id, feature_type=3, name=q.name, evidence=q.evidence))
+
+            if features_to_add:
+                session.bulk_save_objects(features_to_add)
             
+            session.commit()
         except Exception as e:
             session.rollback()
-            print(f"保存特征失败 (Job ID {job_id}): {e}")
+            raise Exception(f"保存特征失败 (Job ID {job_id}): {e}")
         finally:
             session.close()

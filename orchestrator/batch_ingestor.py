@@ -8,7 +8,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from mysql.database import SessionLocal, Job, JobFeature
+from mysql.database import SessionLocal, Job, JobFeature, JobProfileJson
 from llm_service.extractor import JobExtractor
 from data_processor.feature_store import FeatureStore
 
@@ -23,13 +23,14 @@ class BatchIngestor:
         self.store = FeatureStore()
 
     def clear_database(self):
-        """清空特征数据（保留岗位主表，以防结果文件失效）"""
+        """清空特征数据和 JSON 数据（保留岗位主表）"""
         session = SessionLocal()
-        print("\n--- [清理] 正在清空 job_features 表中的旧特征 ---")
+        print("\n--- [清理] 正在清空旧画像数据 ---")
         try:
+            num_json = session.query(JobProfileJson).delete()
             num_features = session.query(JobFeature).delete()
             session.commit()
-            print(f"清理完成：删除了 {num_features} 条画像特征记录。岗位主表已保留。")
+            print(f"清理完成：删除了 {num_json} 条 JSON 记录和 {num_features} 条特征记录。")
         except Exception as e:
             session.rollback()
             print(f"清理失败: {e}")
@@ -65,33 +66,18 @@ class BatchIngestor:
                 # 提取内容
                 content = response["body"]["choices"][0]["message"]["content"]
                 
-                # --- 增强版修复逻辑：处理反斜杠 ---
-                # 1. 保护已经正确转义的引号 \" -> 暂时替换为特殊占位符
-                content = content.replace('\\"', '___DOUBLE_QUOTE_ESC___')
-                # 2. 将剩下的所有反斜杠转义（解决 Vue2\3 -> Vue2\\3）
-                content = content.replace('\\', '\\\\')
-                # 3. 还原保护的引号 \"
-                content = content.replace('___DOUBLE_QUOTE_ESC___', '\\"')
-                # 4. 额外处理：如果 LLM 输出中包含真正的换行符，也需要转义，否则 json.loads 会报错
-                content = content.replace('\n', '\\n').replace('\r', '\\r')
-                
-                # 由于我们之前手工转义了 \n，但 parser 期望的是一个干净的 JSON 字符串
-                # 如果 content 本身已经是包裹在 {} 中的 JSON，手工转义换行可能会干扰解析
-                # 我们重新整理一下：最核心的是处理 \" 和孤立的 \
-                
-                # 重新精简逻辑：
-                content = response["body"]["choices"][0]["message"]["content"]
-                # 保护合法转义
-                content = content.replace('\\"', '___DQ___').replace('\\n', '___N___')
-                # 转义孤立反斜杠
-                content = content.replace('\\', '\\\\')
-                # 还原
-                content = content.replace('___DQ___', '\\"').replace('___N___', '\\n')
+                # --- 智能修复逻辑：仅转义那些非法的反斜杠 ---
+                # 使用正则：
+                # (?<!\\) -> 确保前面没有反斜杠
+                # \\      -> 匹配当前反斜杠
+                # (?![u"\\/bfnrt]) -> 确保后面不是合法的转义字符
+                import re
+                content = re.sub(r'(?<!\\)\\(?![u"\\/bfnrt])', r'\\\\', content)
                 
                 # 解析 JSON 为 Pydantic 对象
                 profile = self.extractor.parser.parse(content)
                 
-                # 持久化
+                # 持久化 (FeatureStore 内部会处理 job_features 和 job_profiles_json)
                 self.store.save_profile(job_id, profile)
                 success_count += 1
             except Exception as e:
